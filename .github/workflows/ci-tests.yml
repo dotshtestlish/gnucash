@@ -1,5 +1,8 @@
 name: ci-tests
-on: [push, pull_request]
+on: 
+  push:
+  pull_request:
+  workflow_dispatch:  # 添加这一行以支持手动触发
 permissions: {}
 jobs:
   ci_tests_ubuntu-22:
