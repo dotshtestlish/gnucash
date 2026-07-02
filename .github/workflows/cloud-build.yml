@@ -1,8 +1,7 @@
 name: Cloud Build (MCP-triggered)
 
-# 此工作流专为通过 GitHub MCP 触发的云端编译设计
-# 支持 workflow_dispatch 传递参数，也支持 push/PR 自动触发
-# 产物自动上传为 artifact，供 MCP 检索下载
+# 支持 workflow_dispatch（MCP 调用）和 push/PR 自动触发
+# 自动推送时默认编译 Linux（RelWithDebInfo 模式）
 
 on:
   push:
@@ -41,24 +40,46 @@ on:
         default: true
         type: boolean
 
-permissions: {}
+permissions:
+  contents: read
+
+env:
+  # 默认值（push/PR 事件使用），workflow_dispatch 会覆盖
+  BUILD_TYPE: RelWithDebInfo
+  WITH_PYTHON: ON
+  UPLOAD_ARTIFACT: true
 
 jobs:
+  set-opts:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    outputs:
+      build_type: ${{ inputs.build_type || 'RelWithDebInfo' }}
+      with_python: ${{ inputs.with_python && 'ON' || 'OFF' }}
+      upload: ${{ inputs.upload_artifact && 'true' || 'false' }}
+    steps:
+      - run: echo "Options resolved"
+
   # ──────────────────────────────────────────────
   # Linux 编译 (GitHub-hosted Ubuntu Runner)
   # ──────────────────────────────────────────────
   build-linux:
-    if: ${{ inputs.platform == 'linux' || inputs.platform == 'linux+macos' || github.event_name != 'workflow_dispatch' }}
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.platform == 'linux' || inputs.platform == 'linux+macos' }}
     runs-on: ubuntu-22.04
     name: Linux Cloud Build
     env:
       TZ: America/Los_Angeles
-      BUILD_TYPE: ${{ inputs.build_type || 'RelWithDebInfo' }}
-      WITH_PYTHON: ${{ inputs.with_python || 'ON' && 'ON' || 'OFF' }}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Set build options (workflow_dispatch)
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          echo "BUILD_TYPE=${{ inputs.build_type }}" >> $GITHUB_ENV
+          echo "WITH_PYTHON=${{ inputs.with_python && 'ON' || 'OFF' }}" >> $GITHUB_ENV
+          echo "UPLOAD_ARTIFACT=${{ inputs.upload_artifact && 'true' || 'false' }}" >> $GITHUB_ENV
 
       - name: Install system dependencies
         run: |
@@ -101,16 +122,15 @@ jobs:
           CTEST_OUTPUT_ON_FAILURE: On
 
       - name: Package build artifacts
-        if: ${{ inputs.upload_artifact != false }}
+        if: ${{ env.UPLOAD_ARTIFACT == 'true' }}
         run: |
           cd build
-          # 打包关键产物：二进制 + 库文件
           DESTDIR=${{ runner.temp }}/package ninja install
           cd ${{ runner.temp }}/package
           tar czf $GITHUB_WORKSPACE/gnucash-linux-${{ github.sha }}.tar.gz .
 
       - name: Upload Linux artifacts
-        if: ${{ inputs.upload_artifact != false }}
+        if: ${{ env.UPLOAD_ARTIFACT == 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: gnucash-linux-${{ github.sha }}
@@ -128,19 +148,23 @@ jobs:
   # macOS 编译 (GitHub-hosted macOS Runner)
   # ──────────────────────────────────────────────
   build-macos:
-    if: ${{ inputs.platform == 'macos' || inputs.platform == 'linux+macos' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.platform == 'macos' || inputs.platform == 'linux+macos') }}
     runs-on: macos-latest
     name: macOS Cloud Build
     env:
       TZ: America/Los_Angeles
-      BUILD_TYPE: ${{ inputs.build_type || 'RelWithDebInfo' }}
-      WITH_PYTHON: ${{ inputs.with_python || 'ON' && 'ON' || 'OFF' }}
       PREFIX: ${{ runner.temp }}/gnucash/inst
       SRCROOT: ${{ runner.temp }}/gnucash/source
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Set build options (workflow_dispatch)
+        run: |
+          echo "BUILD_TYPE=${{ inputs.build_type }}" >> $GITHUB_ENV
+          echo "WITH_PYTHON=${{ inputs.with_python && 'ON' || 'OFF' }}" >> $GITHUB_ENV
+          echo "UPLOAD_ARTIFACT=${{ inputs.upload_artifact && 'true' || 'false' }}" >> $GITHUB_ENV
 
       - name: Install Ninja
         run: brew install ninja
@@ -193,7 +217,7 @@ jobs:
           CTEST_OUTPUT_ON_FAILURE: On
 
       - name: Package build artifacts
-        if: ${{ inputs.upload_artifact != false }}
+        if: ${{ env.UPLOAD_ARTIFACT == 'true' }}
         run: |
           cd ${{ runner.temp }}/gnucash/build
           DESTDIR=${{ runner.temp }}/package ninja install
@@ -201,7 +225,7 @@ jobs:
           tar czf $GITHUB_WORKSPACE/gnucash-macos-${{ github.sha }}.tar.gz .
 
       - name: Upload macOS artifacts
-        if: ${{ inputs.upload_artifact != false }}
+        if: ${{ env.UPLOAD_ARTIFACT == 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: gnucash-macos-${{ github.sha }}
