@@ -1,18 +1,14 @@
 name: Cloud Build (MCP-triggered)
 
-# 支持 workflow_dispatch（MCP 调用）和 push/PR 自动触发
-# 自动推送时默认编译 Linux（RelWithDebInfo 模式）
-
 on:
   push:
-    branches: [stable, main]
+    branches: [stable]
   pull_request:
     branches: [stable]
   workflow_dispatch:
     inputs:
       platform:
-        description: 'Target platform for compilation'
-        required: false
+        description: 'Target platform'
         default: 'linux'
         type: choice
         options:
@@ -20,221 +16,65 @@ on:
           - macos
           - linux+macos
       build_type:
-        description: 'CMake build type'
-        required: false
+        description: 'Build type'
         default: 'RelWithDebInfo'
         type: choice
         options:
           - Debug
           - RelWithDebInfo
           - Release
-          - Asan
       with_python:
-        description: 'Enable Python bindings'
-        required: false
-        default: true
-        type: boolean
-      upload_artifact:
-        description: 'Upload compiled artifacts'
-        required: false
+        description: 'Python bindings'
         default: true
         type: boolean
 
 permissions:
   contents: read
 
-env:
-  # 默认值（push/PR 事件使用），workflow_dispatch 会覆盖
-  BUILD_TYPE: RelWithDebInfo
-  WITH_PYTHON: ON
-  UPLOAD_ARTIFACT: true
-
 jobs:
-  set-opts:
-    runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch'
-    outputs:
-      build_type: ${{ inputs.build_type || 'RelWithDebInfo' }}
-      with_python: ${{ inputs.with_python && 'ON' || 'OFF' }}
-      upload: ${{ inputs.upload_artifact && 'true' || 'false' }}
-    steps:
-      - run: echo "Options resolved"
-
-  # ──────────────────────────────────────────────
-  # Linux 编译 (GitHub-hosted Ubuntu Runner)
-  # ──────────────────────────────────────────────
   build-linux:
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.platform == 'linux' || inputs.platform == 'linux+macos' }}
     runs-on: ubuntu-22.04
     name: Linux Cloud Build
     env:
       TZ: America/Los_Angeles
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Set build options (workflow_dispatch)
         if: github.event_name == 'workflow_dispatch'
         run: |
           echo "BUILD_TYPE=${{ inputs.build_type }}" >> $GITHUB_ENV
           echo "WITH_PYTHON=${{ inputs.with_python && 'ON' || 'OFF' }}" >> $GITHUB_ENV
-          echo "UPLOAD_ARTIFACT=${{ inputs.upload_artifact && 'true' || 'false' }}" >> $GITHUB_ENV
 
-      - name: Install system dependencies
+      - name: Set default options (push/PR)
+        if: github.event_name != 'workflow_dispatch'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            gettext cmake libxslt-dev xsltproc ninja-build \
-            libboost-all-dev libgtk-3-dev guile-2.2-dev \
-            libgwengui-gtk3-dev libaqbanking-dev libofx-dev \
-            libdbi-dev libdbd-sqlite3 libwebkit2gtk-4.0-dev \
-            googletest
+          echo "BUILD_TYPE=RelWithDebInfo" >> $GITHUB_ENV
+          echo "WITH_PYTHON=ON" >> $GITHUB_ENV
 
-      - name: Install language packs
-        run: sudo apt-get --reinstall install -y language-pack-en language-pack-fr
+      - run: sudo apt-get update
+      - name: Install dependencies
+        run: sudo apt-get install -y gettext cmake libxslt-dev xsltproc ninja-build libboost-all-dev libgtk-3-dev guile-2.2-dev libgwengui-gtk3-dev libaqbanking-dev libofx-dev libdbi-dev libdbd-sqlite3 libwebkit2gtk-4.0-dev googletest
+      - run: sudo apt-get --reinstall install -y language-pack-en language-pack-fr
 
-      - name: Create build directories
-        run: |
-          mkdir -p ${{ runner.temp }}/inst
-          mkdir -p build
-
-      - name: Configure with CMake + Ninja
+      - run: mkdir -p ${{ runner.temp }}/inst build
+      - name: Configure
         run: |
           cd build
-          cmake -G Ninja \
-            -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
-            -DWITH_PYTHON=${{ env.WITH_PYTHON }} \
-            -DCMAKE_INSTALL_PREFIX=${{ runner.temp }}/inst \
-            $GITHUB_WORKSPACE
+          cmake -G Ninja -DWITH_PYTHON=${{ env.WITH_PYTHON }} -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} -DCMAKE_INSTALL_PREFIX=${{ runner.temp }}/inst $GITHUB_WORKSPACE
 
-      - name: Build GnuCash
-        run: |
-          cd build
-          ninja -j$(nproc)
+      - name: Build
+        run: cd build && ninja -j$(nproc)
 
-      - name: Run tests
-        if: ${{ env.BUILD_TYPE != 'Release' }}
-        run: |
-          cd build
-          ninja check
+      - name: Test
+        if: env.BUILD_TYPE != 'Release'
+        run: cd build && ninja check
         env:
           CTEST_OUTPUT_ON_FAILURE: On
 
-      - name: Package build artifacts
-        if: ${{ env.UPLOAD_ARTIFACT == 'true' }}
-        run: |
-          cd build
-          DESTDIR=${{ runner.temp }}/package ninja install
-          cd ${{ runner.temp }}/package
-          tar czf $GITHUB_WORKSPACE/gnucash-linux-${{ github.sha }}.tar.gz .
-
-      - name: Upload Linux artifacts
-        if: ${{ env.UPLOAD_ARTIFACT == 'true' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: gnucash-linux-${{ github.sha }}
-          path: gnucash-linux-${{ github.sha }}.tar.gz
-          retention-days: 7
-
-      - name: Upload test logs on failure
+      - name: Upload test logs
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: TestLog-linux
-          path: ${{ github.workspace }}/build/Testing/Temporary/LastTest.log
-
-  # ──────────────────────────────────────────────
-  # macOS 编译 (GitHub-hosted macOS Runner)
-  # ──────────────────────────────────────────────
-  build-macos:
-    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.platform == 'macos' || inputs.platform == 'linux+macos') }}
-    runs-on: macos-latest
-    name: macOS Cloud Build
-    env:
-      TZ: America/Los_Angeles
-      PREFIX: ${{ runner.temp }}/gnucash/inst
-      SRCROOT: ${{ runner.temp }}/gnucash/source
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set build options (workflow_dispatch)
-        run: |
-          echo "BUILD_TYPE=${{ inputs.build_type }}" >> $GITHUB_ENV
-          echo "WITH_PYTHON=${{ inputs.with_python && 'ON' || 'OFF' }}" >> $GITHUB_ENV
-          echo "UPLOAD_ARTIFACT=${{ inputs.upload_artifact && 'true' || 'false' }}" >> $GITHUB_ENV
-
-      - name: Install Ninja
-        run: brew install ninja
-
-      - name: Download prebuilt dependencies
-        uses: carlosperate/download-file-action@v2
-        with:
-          file-url: 'https://downloads.sourceforge.net/gnucash/Dependencies/gnucash-5.13-mac-dependencies.tar.xz'
-          file-name: gnucash-dependencies.tar.xz
-          sha256: '51bae6f0ff384bbcb1547e21553398a0a399ca1f5f2f517b8de5cd2316464760'
-
-      - name: Download Google Test
-        uses: carlosperate/download-file-action@v2
-        with:
-          file-url: 'https://github.com/google/googletest/archive/release-1.10.0.tar.gz'
-          file-name: googletest.tar.gz
-
-      - name: Extract dependencies
-        run: |
-          mkdir -p $PREFIX $SRCROOT
-          tar -xf $GITHUB_WORKSPACE/gnucash-dependencies.tar.xz -C $PREFIX
-          tar -xf $GITHUB_WORKSPACE/googletest.tar.gz -C $SRCROOT
-          cd $SRCROOT
-          mv googletest-* googletest
-
-      - name: Configure with CMake + Ninja
-        run: |
-          mkdir -p ${{ runner.temp }}/gnucash/build
-          cd ${{ runner.temp }}/gnucash/build
-          cmake -GNinja \
-            -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
-            -DPKG_CONFIG_EXECUTABLE=$PREFIX/bin/pkgconf \
-            -DCMAKE_INSTALL_PREFIX=$PREFIX \
-            -DCMAKE_PREFIX_PATH=$PREFIX \
-            -DWITH_PYTHON=${{ env.WITH_PYTHON }} \
-            -DGTEST_ROOT=$SRCROOT/googletest \
-            $GITHUB_WORKSPACE
-
-      - name: Build GnuCash
-        run: |
-          cd ${{ runner.temp }}/gnucash/build
-          ninja -j$(sysctl -n hw.logicalcpu)
-
-      - name: Run tests
-        if: ${{ env.BUILD_TYPE != 'Release' }}
-        run: |
-          cd ${{ runner.temp }}/gnucash/build
-          ninja check
-        env:
-          CTEST_OUTPUT_ON_FAILURE: On
-
-      - name: Package build artifacts
-        if: ${{ env.UPLOAD_ARTIFACT == 'true' }}
-        run: |
-          cd ${{ runner.temp }}/gnucash/build
-          DESTDIR=${{ runner.temp }}/package ninja install
-          cd ${{ runner.temp }}/package
-          tar czf $GITHUB_WORKSPACE/gnucash-macos-${{ github.sha }}.tar.gz .
-
-      - name: Upload macOS artifacts
-        if: ${{ env.UPLOAD_ARTIFACT == 'true' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: gnucash-macos-${{ github.sha }}
-          path: gnucash-macos-${{ github.sha }}.tar.gz
-          retention-days: 7
-
-      - name: Upload test logs on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: TestLog-macos
-          path: ${{ runner.temp }}/gnucash/build/Testing/Temporary/LastTest.log
+          path: build/Testing/Temporary/LastTest.log
