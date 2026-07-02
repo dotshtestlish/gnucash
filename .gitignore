@@ -198,6 +198,7 @@ messages.mo
 # Gas Town (added by gt)
 .runtime/
 .claude/
+.mcp.json
 .logs/
 __pycache__/
 state.json
